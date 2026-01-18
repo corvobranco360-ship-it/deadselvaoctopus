@@ -21,11 +21,29 @@ interface GameComponentProps {
 const GameComponent: React.FC<GameComponentProps> = ({ levelIndex, onGameOver, onLevelComplete }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [hud, setHud] = useState({ health: 3, arrows: 0, level: 0 });
+  
+  // Joystick State for UI rendering
+  const [joystickVisual, setJoystickVisual] = useState({ x: 0, y: 0, active: false });
+
   const levelData = LEVELS[levelIndex] || LEVELS[0];
   const audioCtxRef = useRef<AudioContext | null>(null);
 
-  // Escalonamento de dificuldade
-  const difficultyMultiplier = 1 + (levelIndex * 0.15); // Inimigos 15% maiores/fortes por nível
+  const difficultyMultiplier = 1 + (levelIndex * 0.15);
+
+  // Input Refs
+  const joystickRef = useRef({
+    active: false,
+    id: null as number | null,
+    originX: 0,
+    originY: 0,
+    input: { x: 0, y: 0 } // Normalized -1 to 1
+  });
+
+  const buttonRef = useRef({
+    jump: false,
+    shoot: false,
+    trap: false
+  });
 
   const stateRef = useRef({
     frame: 0,
@@ -37,7 +55,7 @@ const GameComponent: React.FC<GameComponentProps> = ({ levelIndex, onGameOver, o
       state: 'idle' as 'idle' | 'run' | 'jump' | 'shoot',
       shootTimer: 0,
       invincible: 0,
-      lastStablePos: { x: 50, y: 200 } // Checkpoint
+      lastStablePos: { x: 50, y: 200 }
     },
     enemies: levelData.enemies.map(e => ({
       ...e,
@@ -46,7 +64,7 @@ const GameComponent: React.FC<GameComponentProps> = ({ levelIndex, onGameOver, o
       vy: 0,
       width: 24 * difficultyMultiplier, 
       height: 24 * difficultyMultiplier,
-      hp: 4 + Math.floor(levelIndex), // HP Base 4 + 1 por nível
+      hp: 4 + Math.floor(levelIndex),
       maxHp: 4 + Math.floor(levelIndex),
       isTrapped: false,
       trapTimer: 0,
@@ -63,12 +81,6 @@ const GameComponent: React.FC<GameComponentProps> = ({ levelIndex, onGameOver, o
     keys: {} as { [key: string]: boolean },
     camX: 0
   });
-
-  const handleTouchStart = (key: string) => { 
-    stateRef.current.keys[key.toLowerCase()] = true; 
-    initAudio();
-  };
-  const handleTouchEnd = (key: string) => { stateRef.current.keys[key.toLowerCase()] = false; };
 
   // --- AUDIO ENGINE ---
   const initAudio = () => {
@@ -130,14 +142,13 @@ const GameComponent: React.FC<GameComponentProps> = ({ levelIndex, onGameOver, o
 
   const playMusic = () => {
     if (!audioCtxRef.current) return;
-    // Simple bassline loop
     const ctx = audioCtxRef.current;
-    const notes = [110, 110, 130, 110, 146, 130, 110, 98]; // Simple melody
+    const notes = [110, 110, 130, 110, 146, 130, 110, 98]; 
     let noteIndex = 0;
     
     const playNextNote = () => {
-      if(!canvasRef.current) return; // Stop if unmounted
-      if(ctx.state === 'closed') return; // Stop if closed
+      if(!canvasRef.current) return; 
+      if(ctx.state === 'closed') return; 
 
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
@@ -159,7 +170,6 @@ const GameComponent: React.FC<GameComponentProps> = ({ levelIndex, onGameOver, o
   // --- INITIALIZATION ---
   useEffect(() => {
     const s = stateRef.current;
-    // Parse map for items
     s.items = [];
     levelData.map.forEach((row, y) => {
       for (let x = 0; x < row.length; x++) {
@@ -191,13 +201,21 @@ const GameComponent: React.FC<GameComponentProps> = ({ levelIndex, onGameOver, o
 
       if (p.invincible > 0) p.invincible--;
 
-      const moveLeft = s.keys['arrowleft'] || s.keys['left'] || s.keys['a'];
-      const moveRight = s.keys['arrowright'] || s.keys['right'] || s.keys['d'];
-      const aimUp = s.keys['arrowup'] || s.keys['up'] || s.keys['w'];
-      const aimDown = s.keys['arrowdown'] || s.keys['down'] || s.keys['s'];
-      const jump = s.keys['arrowup'] || s.keys['z'] || s.keys['w'] || s.keys[' '];
-      const shoot = s.keys['x'] || s.keys['j'];
-      const setTrap = s.keys['c'] || s.keys['k'];
+      // Inputs (Keyboard + Virtual Joystick + Touch Buttons)
+      const joy = joystickRef.current.input;
+      const btns = buttonRef.current;
+
+      const moveLeft = s.keys['arrowleft'] || s.keys['left'] || s.keys['a'] || joy.x < -0.3;
+      const moveRight = s.keys['arrowright'] || s.keys['right'] || s.keys['d'] || joy.x > 0.3;
+      
+      // Analog Aiming
+      const aimActive = Math.abs(joy.y) > 0.3;
+      const aimUp = s.keys['arrowup'] || s.keys['up'] || s.keys['w'] || (aimActive && joy.y < -0.3);
+      const aimDown = s.keys['arrowdown'] || s.keys['down'] || s.keys['s'] || (aimActive && joy.y > 0.3);
+      
+      const jump = s.keys['z'] || s.keys[' '] || btns.jump; // Space/Z or Button
+      const shoot = s.keys['x'] || s.keys['j'] || btns.shoot;
+      const setTrap = s.keys['c'] || s.keys['k'] || btns.trap;
 
       p.vx = 0;
       if (moveLeft) { p.vx = -PLAYER_SPEED; p.facingRight = false; p.state = 'run'; }
@@ -221,9 +239,10 @@ const GameComponent: React.FC<GameComponentProps> = ({ levelIndex, onGameOver, o
       p.x += p.vx;
       p.y += p.vy;
 
-      // Checkpoint Logic (Update stable pos)
+      // Checkpoint Logic - Update more frequently when stable to ensure safe respawn
       if (p.isGrounded) {
-        if (s.frame % 60 === 0) { // Update checkpoint every second standing
+        if (s.frame % 15 === 0) { 
+          // Ensure we are not standing on air (extra check not needed if grounded is true, but safe)
           p.lastStablePos = { x: p.x, y: p.y };
         }
       }
@@ -236,6 +255,7 @@ const GameComponent: React.FC<GameComponentProps> = ({ levelIndex, onGameOver, o
           p.x = p.lastStablePos.x;
           p.y = p.lastStablePos.y - 20;
           p.vy = 0;
+          p.vx = 0; // Fix: Stop momentum on respawn
           p.invincible = 60;
         } else {
           onGameOver();
@@ -282,25 +302,23 @@ const GameComponent: React.FC<GameComponentProps> = ({ levelIndex, onGameOver, o
           if (p.x < item.x + 16 && p.x + p.width > item.x && p.y < item.y + 16 && p.y + p.height > item.y) {
             item.collected = true;
             playSfx('collect');
-            if (item.type === 'HEART') p.health = Math.min(p.health + 1, 5); // Max 5 hearts
+            if (item.type === 'HEART') p.health = Math.min(p.health + 1, 5);
             if (item.type === 'AMMO') p.arrows += 5;
             for(let i=0; i<8; i++) createParticle(item.x+8, item.y+8, '#ffff00', (Math.random()-0.5)*3, (Math.random()-0.5)*3, 20);
           }
         }
       });
 
-      // Shooting with Directional Aim
+      // Shooting
       if (shoot && p.arrows > 0 && !s.keys['shootLock']) {
         p.shootTimer = 15;
         
         let vx = p.facingRight ? 8 : -8;
-        let vy = -0.5; // Default slight arc
+        let vy = -0.5;
 
-        // Analog Aiming Logic
         if (aimUp) {
           vy = -6;
           vx = p.facingRight ? 5 : -5;
-          // If not moving horizontally, shoot straight up
           if (!moveLeft && !moveRight) { vx = 0; vy = -8; }
         } else if (aimDown && !p.isGrounded) {
           vy = 6;
@@ -337,7 +355,7 @@ const GameComponent: React.FC<GameComponentProps> = ({ levelIndex, onGameOver, o
           if (!e.dead && a.x > e.x && a.x < e.x + e.width && a.y > e.y && a.y < e.y + e.height) {
             e.hp--;
             hit = true;
-            e.blink = 10; // Flash effect
+            e.blink = 10;
             playSfx('hit');
             if (e.hp <= 0) {
               e.dead = true;
@@ -407,6 +425,7 @@ const GameComponent: React.FC<GameComponentProps> = ({ levelIndex, onGameOver, o
       setHud({ health: p.health, arrows: p.arrows, level: levelData.id });
     };
 
+    // Drawing Functions
     const drawPlayer = (p: any, frame: number) => {
       const s = stateRef.current;
       ctx.save(); ctx.translate(p.x + p.width/2, p.y + p.height/2);
@@ -428,10 +447,12 @@ const GameComponent: React.FC<GameComponentProps> = ({ levelIndex, onGameOver, o
 
       ctx.strokeStyle = '#5d4037'; ctx.lineWidth = 2; ctx.beginPath();
       
-      // Draw Bow Rotation
       let rot = 0;
-      if (s.keys['arrowup'] || s.keys['w']) rot = -Math.PI/4;
-      if ((s.keys['arrowdown'] || s.keys['s']) && !p.isGrounded) rot = Math.PI/4;
+      // Visually indicate aim with bow rotation based on joystick or keys
+      const joy = joystickRef.current.input;
+      const aiming = Math.abs(joy.y) > 0.3;
+      if (s.keys['arrowup'] || s.keys['w'] || (aiming && joy.y < -0.3)) rot = -Math.PI/4;
+      if ((s.keys['arrowdown'] || s.keys['s'] || (aiming && joy.y > 0.3)) && !p.isGrounded) rot = Math.PI/4;
 
       ctx.rotate(rot);
       if (p.state === 'shoot') ctx.arc(10, 0, 15, -Math.PI/2.5, Math.PI/2.5);
@@ -470,12 +491,10 @@ const GameComponent: React.FC<GameComponentProps> = ({ levelIndex, onGameOver, o
         ctx.fillRect(e.x+e.width/4, e.y+e.height/4, e.width/2, e.height/2);
       }
       
-      // Draw HP Bar
       if (e.hp < e.maxHp) {
         ctx.fillStyle = 'red'; ctx.fillRect(e.x, e.y - 6, e.width, 3);
         ctx.fillStyle = 'green'; ctx.fillRect(e.x, e.y - 6, e.width * (e.hp / e.maxHp), 3);
       }
-
       ctx.restore();
     };
 
@@ -506,7 +525,6 @@ const GameComponent: React.FC<GameComponentProps> = ({ levelIndex, onGameOver, o
         }
       });
 
-      // Draw Items
       s.items.forEach(item => {
         if (!item.collected) {
           const floatY = Math.sin(s.frame * 0.1 + item.floatOffset) * 3;
@@ -544,18 +562,31 @@ const GameComponent: React.FC<GameComponentProps> = ({ levelIndex, onGameOver, o
     };
 
     const loop = () => { update(); draw(); animationId = requestAnimationFrame(loop); };
+    
+    // Keyboard inputs
     const handleKey = (e: KeyboardEvent, isDown: boolean) => {
       const k = e.key.toLowerCase(); stateRef.current.keys[k] = isDown;
       if (isDown) initAudio();
     };
 
+    // Global Window Listeners to clear stuck states
+    const handleBlur = () => {
+       stateRef.current.keys = {};
+       buttonRef.current = { jump: false, shoot: false, trap: false };
+       joystickRef.current.active = false;
+       joystickRef.current.input = { x: 0, y: 0 };
+       setJoystickVisual({ x: 0, y: 0, active: false });
+    };
+
     window.addEventListener('keydown', (e) => handleKey(e, true));
     window.addEventListener('keyup', (e) => handleKey(e, false));
+    window.addEventListener('blur', handleBlur);
     loop();
 
     return () => {
       window.removeEventListener('keydown', (e) => handleKey(e, true));
       window.removeEventListener('keyup', (e) => handleKey(e, false));
+      window.removeEventListener('blur', handleBlur);
       cancelAnimationFrame(animationId);
       if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
         audioCtxRef.current.close();
@@ -564,9 +595,69 @@ const GameComponent: React.FC<GameComponentProps> = ({ levelIndex, onGameOver, o
     };
   }, [levelIndex]);
 
+  // --- JOYSTICK HANDLERS ---
+  const handleJoystickDown = (e: React.PointerEvent) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const rect = e.currentTarget.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    
+    joystickRef.current = {
+      active: true,
+      id: e.pointerId,
+      originX: centerX,
+      originY: centerY,
+      input: { x: 0, y: 0 }
+    };
+    setJoystickVisual({ x: 0, y: 0, active: true });
+    initAudio();
+  };
+
+  const handleJoystickMove = (e: React.PointerEvent) => {
+    if (!joystickRef.current.active || e.pointerId !== joystickRef.current.id) return;
+    
+    const maxDist = 32;
+    const dx = e.clientX - joystickRef.current.originX;
+    const dy = e.clientY - joystickRef.current.originY;
+    const dist = Math.hypot(dx, dy);
+    
+    let visualX = dx;
+    let visualY = dy;
+    
+    if (dist > maxDist) {
+      const angle = Math.atan2(dy, dx);
+      visualX = Math.cos(angle) * maxDist;
+      visualY = Math.sin(angle) * maxDist;
+    }
+    
+    joystickRef.current.input = {
+      x: visualX / maxDist,
+      y: visualY / maxDist
+    };
+    setJoystickVisual({ x: visualX, y: visualY, active: true });
+  };
+
+  const handleJoystickUp = (e: React.PointerEvent) => {
+    if (!joystickRef.current.active || e.pointerId !== joystickRef.current.id) return;
+    joystickRef.current.active = false;
+    joystickRef.current.input = { x: 0, y: 0 };
+    setJoystickVisual({ x: 0, y: 0, active: false });
+  };
+
+  // --- ACTION BUTTON HANDLERS ---
+  const handleBtnDown = (btn: 'jump' | 'shoot' | 'trap') => (e: React.PointerEvent) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    buttonRef.current[btn] = true;
+    initAudio();
+  };
+  
+  const handleBtnUp = (btn: 'jump' | 'shoot' | 'trap') => (e: React.PointerEvent) => {
+    buttonRef.current[btn] = false;
+  };
+
   return (
-    <div className="flex flex-col items-center justify-center w-full h-full bg-[#050505] p-2">
-      <div className="absolute top-0 left-0 right-0 p-4 flex justify-between text-white text-[9px] z-10 bg-black/40">
+    <div className="flex flex-col items-center justify-center w-full h-full bg-[#050505] p-2 select-none touch-none">
+      <div className="absolute top-0 left-0 right-0 p-4 flex justify-between text-white text-[9px] z-10 bg-black/40 pointer-events-none">
         <div>LVL: {hud.level}</div>
         <div className="flex gap-2">
           {Array.from({ length: 5 }).map((_, i) => (
@@ -584,19 +675,46 @@ const GameComponent: React.FC<GameComponentProps> = ({ levelIndex, onGameOver, o
         onClick={initAudio}
       />
 
-      <div className="grid grid-cols-2 w-full max-w-xl p-4 gap-4 select-none mt-4">
-        <div className="flex gap-2 relative">
-          <button onPointerDown={() => handleTouchStart('left')} onPointerUp={() => handleTouchEnd('left')} className="w-16 h-16 bg-white/10 active:bg-white/30 pixel-border text-white text-xl">←</button>
-          <div className="flex flex-col gap-2">
-            <button onPointerDown={() => handleTouchStart('up')} onPointerUp={() => handleTouchEnd('up')} className="w-16 h-8 bg-white/10 active:bg-white/30 pixel-border text-white text-xs">▲</button>
-             <button onPointerDown={() => handleTouchStart('down')} onPointerUp={() => handleTouchEnd('down')} className="w-16 h-8 bg-white/10 active:bg-white/30 pixel-border text-white text-xs">▼</button>
+      <div className="grid grid-cols-2 w-full max-w-xl p-4 gap-4 mt-4 h-32">
+        {/* VIRTUAL JOYSTICK */}
+        <div className="relative flex items-center justify-center">
+          <div 
+            className="w-24 h-24 rounded-full bg-white/10 pixel-border relative touch-none"
+            onPointerDown={handleJoystickDown}
+            onPointerMove={handleJoystickMove}
+            onPointerUp={handleJoystickUp}
+            onPointerCancel={handleJoystickUp}
+            onPointerLeave={handleJoystickUp}
+          >
+            <div 
+              className="absolute w-10 h-10 rounded-full bg-green-600/80 shadow-lg pointer-events-none"
+              style={{
+                transform: `translate(${joystickVisual.x}px, ${joystickVisual.y}px)`,
+                left: 'calc(50% - 20px)',
+                top: 'calc(50% - 20px)',
+                transition: joystickVisual.active ? 'none' : 'transform 0.1s'
+              }}
+            />
           </div>
-          <button onPointerDown={() => handleTouchStart('right')} onPointerUp={() => handleTouchEnd('right')} className="w-16 h-16 bg-white/10 active:bg-white/30 pixel-border text-white text-xl">→</button>
         </div>
-        <div className="flex gap-2 justify-end">
-          <button onPointerDown={() => handleTouchStart('z')} onPointerUp={() => handleTouchEnd('z')} className="w-14 h-14 bg-blue-600/30 active:bg-blue-600/60 pixel-border text-white text-[8px]">PULO</button>
-          <button onPointerDown={() => handleTouchStart('x')} onPointerUp={() => handleTouchEnd('x')} className="w-14 h-14 bg-red-600/30 active:bg-red-600/60 pixel-border text-white text-[8px]">TIRO</button>
-          <button onPointerDown={() => handleTouchStart('c')} onPointerUp={() => handleTouchEnd('c')} className="w-14 h-14 bg-amber-600/30 active:bg-amber-600/60 pixel-border text-white text-[8px]">ARMAD.</button>
+
+        {/* ACTION BUTTONS */}
+        <div className="flex gap-2 justify-end items-center">
+          <button 
+            onPointerDown={handleBtnDown('jump')} onPointerUp={handleBtnUp('jump')} 
+            onPointerCancel={handleBtnUp('jump')} onPointerLeave={handleBtnUp('jump')}
+            className="w-16 h-16 bg-blue-600/30 active:bg-blue-600/60 pixel-border text-white text-[10px] active:scale-95 transition-transform"
+          >JUMP</button>
+          <button 
+            onPointerDown={handleBtnDown('shoot')} onPointerUp={handleBtnUp('shoot')} 
+            onPointerCancel={handleBtnUp('shoot')} onPointerLeave={handleBtnUp('shoot')}
+            className="w-16 h-16 bg-red-600/30 active:bg-red-600/60 pixel-border text-white text-[10px] active:scale-95 transition-transform"
+          >SHOOT</button>
+          <button 
+            onPointerDown={handleBtnDown('trap')} onPointerUp={handleBtnUp('trap')} 
+            onPointerCancel={handleBtnUp('trap')} onPointerLeave={handleBtnUp('trap')}
+            className="w-16 h-16 bg-amber-600/30 active:bg-amber-600/60 pixel-border text-white text-[10px] active:scale-95 transition-transform"
+          >TRAP</button>
         </div>
       </div>
     </div>
