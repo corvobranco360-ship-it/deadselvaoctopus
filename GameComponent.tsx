@@ -403,7 +403,7 @@ const GameComponent: React.FC<GameComponentProps> = ({ levelIndex, onGameOver, o
           e.y += (p.y - 30 - e.y) * 0.015 + Math.sin(s.frame * 0.1) * 1.5;
         }
 
-        if (p.invincible <= 0 && p.x < e.x + e.width && p.x + p.width > e.x && p.y < e.y + e.height && p.y + p.height > e.y) {
+        if (p.invincible <= 0 && p.x < e.x + e.width && p.x + p.width > e.x && p.y < e.y + p.height && p.y + p.height > e.y) {
           p.health--; p.invincible = 60; p.vy = -6; p.vx = p.x < e.x ? -8 : 8;
           playSfx('hit');
           if (p.health <= 0) { onGameOver(); cancelAnimationFrame(animationId); }
